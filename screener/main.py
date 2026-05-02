@@ -81,6 +81,10 @@ def main() -> None:
             if pool in results_by_pool:
                 results_by_pool[pool].append(r)
 
+        vetoed = [r["ticker"] for r in scored if r.get("m_vetoed")]
+        if vetoed:
+            logger.info(f"M-veto（负超额收益降至 watch）: {', '.join(vetoed)}")
+
         logger.info(
             f"Final: buy={len(results_by_pool['buy'])}  "
             f"review={len(results_by_pool['review'])}  "

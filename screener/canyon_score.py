@@ -285,8 +285,11 @@ def score_e(ticker: str, hist: pd.DataFrame) -> dict:
     except Exception as e:
         logger.debug(f"score_e error {ticker}: {e}")
 
-    d["total"]  = total
-    d["passed"] = total >= 5
+    d["total"] = total
+    # 硬规则：回撤 > 20% 或盈亏比 < 1.5 → 直接不通过（即使总分达标）
+    _pullback_fail = d.get("pullback_pct", 0) > 20
+    _rr_fail       = d.get("rr_ratio") is not None and d["rr_ratio"] < 1.5
+    d["passed"]    = total >= 4 and not _pullback_fail and not _rr_fail
     return d
 
 
@@ -378,6 +381,9 @@ def score_f(ticker: str) -> dict:
 
 def classify(c: dict, e: dict, m: dict) -> str:
     if c["passed"] and e["passed"]:
+        # M-veto：超额收益为负时不得进入可买池，强制降级潜伏观察
+        if m.get("excess_return_pct", 0) < 0:
+            return "watch"
         return "buy"
     if m["strong"] and c["passed"] and not e["passed"]:
         return "review"
@@ -404,6 +410,10 @@ def score_ticker(ticker: str, s0: dict, universe_data: dict, hist: pd.DataFrame)
             "m":                m,
             "f":                f,
             "classification":   cls,
+            "m_vetoed":         bool(
+                c.get("passed") and e.get("passed")
+                and m.get("excess_return_pct", 0) < 0
+            ),
             "days_to_earnings": s0.get("days_to_earnings"),
             "earnings_date":    s0.get("earnings_date"),
         }
