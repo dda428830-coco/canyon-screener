@@ -68,10 +68,15 @@ def score_c(ticker: str, s0: dict, universe_data: dict) -> dict:
         # C2 错价幅度（Forward PE vs 行业中位数）
         fpe         = info.get("forwardPE")
         median_pe   = INDUSTRY_MEDIAN_PE.get(sector, INDUSTRY_MEDIAN_PE["Unknown"])
-        d["forward_pe"]    = round(fpe, 2) if fpe else None
-        d["industry_pe"]   = median_pe
-        d["pe_discount"]   = None
-        if fpe and fpe > 0 and median_pe > 0:
+        d["forward_pe"]  = round(fpe, 2) if fpe is not None else None
+        d["industry_pe"] = median_pe
+        d["pe_discount"] = None
+        d["pe_note"]     = None
+        # Bug-fix: 负 PE（亏损公司）折价计算无意义，直接给 0 分
+        if fpe is not None and fpe <= 0:
+            c2 = 0
+            d["pe_note"] = "PE负值/亏损"
+        elif fpe and fpe > 0 and median_pe > 0:
             discount = (median_pe - fpe) / median_pe
             d["pe_discount"] = round(discount * 100, 1)
             if discount > C_PE_DISCOUNT_HIGH:
@@ -130,7 +135,7 @@ def score_e(ticker: str, hist: pd.DataFrame) -> dict:
             e1, e1_label = 2, "理想回撤区间"
         elif pullback < E_PULLBACK_LOW:
             e1, e1_label = 1, "接近高点"
-        elif pullback <= 0.25:
+        elif pullback <= 0.20:
             e1, e1_label = 1, "回撤适中"
         else:
             e1, e1_label = 0, "回撤过深"
@@ -213,7 +218,8 @@ def score_m(s0: dict) -> dict:
     total += m3
 
     d["total"]  = total
-    d["strong"] = total >= 2
+    # Bug-fix: 负超额收益不能被判为强动量（即便 m2+m3 凑够2分）
+    d["strong"] = total >= 2 and excess > 0
     return d
 
 

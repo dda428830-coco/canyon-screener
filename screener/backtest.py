@@ -212,9 +212,11 @@ def _hist_score_c(s0: dict, info: dict) -> dict:
 
     fpe    = info.get("forwardPE")
     med_pe = INDUSTRY_MEDIAN_PE.get(sector, INDUSTRY_MEDIAN_PE["Unknown"])
-    d["forward_pe"] = round(fpe, 2) if fpe else None
-    d["industry_pe"] = med_pe; d["pe_discount"] = None
-    if fpe and fpe > 0 and med_pe > 0:
+    d["forward_pe"]  = round(fpe, 2) if fpe is not None else None
+    d["industry_pe"] = med_pe; d["pe_discount"] = None; d["pe_note"] = None
+    if fpe is not None and fpe <= 0:
+        c2 = 0; d["pe_note"] = "PE负值/亏损"
+    elif fpe and fpe > 0 and med_pe > 0:
         disc = (med_pe - fpe) / med_pe
         d["pe_discount"] = round(disc * 100, 1)
         c2 = 2 if disc > C_PE_DISCOUNT_HIGH else (1 if disc > C_PE_DISCOUNT_LOW else 0)
@@ -244,7 +246,7 @@ def _hist_score_e(hist_slice: pd.DataFrame) -> dict:
         d["pullback_pct"] = round(pb * 100, 1)
         if E_PULLBACK_LOW <= pb <= E_PULLBACK_HIGH: e1, lbl = 2, "理想区间"
         elif pb < E_PULLBACK_LOW:                    e1, lbl = 1, "接近高点"
-        elif pb <= 0.25:                              e1, lbl = 1, "回撤适中"
+        elif pb <= 0.20:                              e1, lbl = 1, "回撤适中"
         else:                                         e1, lbl = 0, "回撤过深"
         d["e1"] = e1; d["e1_label"] = lbl; total += e1
 
@@ -291,7 +293,7 @@ def _hist_score_m(s0: dict) -> dict:
     d["m2"] = m2; total += m2
     m3 = 1 if (days is not None and 0 < days <= 10) else 0
     d["m3"] = m3; total += m3
-    d["total"] = total; d["strong"] = total >= 2
+    d["total"] = total; d["strong"] = total >= 2 and excess > 0
     return d
 
 

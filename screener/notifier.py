@@ -42,7 +42,10 @@ def format_stock_message(r: dict) -> str:
     fpe      = _safe(c.get("forward_pe"), "{:.1f}")
     ind_pe   = _safe(c.get("industry_pe"), "{}")
     discount = c.get("pe_discount")
-    if discount is not None:
+    pe_note  = c.get("pe_note")        # "PE负值/亏损" 或 None
+    if pe_note:
+        pe_str = f"Forward PE {fpe}（{pe_note}，错价分=0）"
+    elif discount is not None:
         pe_str = f"Forward PE {fpe} vs 行业中位数 {ind_pe}（折价{discount}%）"
     else:
         pe_str = f"Forward PE {fpe} vs 行业中位数 {ind_pe}"
