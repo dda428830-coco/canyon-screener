@@ -189,7 +189,51 @@ C: 7分 | E: 5分 | M: 3分 | F: 5档
 
 ---
 
-## 八、注意事项
+## 八、反馈系统配置
+
+系统内置群组反馈收集功能：Bot 每天盘后自动抓取群内消息，调用 Claude API 解析交易心得，每周五回测结束后发送4周汇总报告。
+
+### 8.1 获取所需 ID
+
+**群组 Chat ID（GROUP_CHAT_ID）**：将 Bot 加入目标群组后，向群组发一条消息，访问
+`https://api.telegram.org/bot<TOKEN>/getUpdates`，在返回 JSON 中找 `"chat":{"id":-1001234567890}` 这样的负整数。
+
+**用户 ID（ALLOWED_USER_IDS）**：在上面的 `getUpdates` 返回中找 `"from":{"id":123456789}`。
+若留空，则接受群内所有人的消息。
+
+### 8.2 获取 Claude API Key
+
+1. 登录 [Anthropic Console](https://console.anthropic.com/)
+2. 进入 **API Keys** 页面，点击 **Create Key**
+3. 复制生成的 Key（格式：`sk-ant-...`）
+
+### 8.3 添加 GitHub Secrets
+
+在仓库 **Settings → Secrets and variables → Actions** 中添加：
+
+| Secret 名称         | 值                                          |
+|---------------------|---------------------------------------------|
+| `CLAUDE_API_KEY`    | Anthropic API Key（`sk-ant-...`）           |
+| `GROUP_CHAT_ID`     | 群组 Chat ID（负整数，如 `-1001234567890`） |
+| `ALLOWED_USER_IDS`  | 白名单用户 ID，逗号分隔；留空允许所有人     |
+
+### 8.4 切换为长驻模式（Mode B）
+
+默认 Mode A 每天单次轮询（适合 GitHub Actions）。如需部署到 VPS / Railway 长驻运行：
+
+```bash
+export FEEDBACK_BOT_MODE=B
+export TELEGRAM_BOT_TOKEN="..."
+export CLAUDE_API_KEY="..."
+export GROUP_CHAT_ID="-1001234567890"
+python -m screener.feedback_bot
+```
+
+Railway 部署：在项目环境变量中设置以上变量，`Start Command` 填写 `python -m screener.feedback_bot`。
+
+---
+
+## 九、注意事项
 
 - **数据来源**：yfinance 为 Yahoo Finance 非官方封装，可能因 Yahoo 接口变更而出现数据异常
 - **财报日期**：部分股票的财报日期可能未更新，请自行核实重要个股

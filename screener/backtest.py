@@ -977,6 +977,13 @@ def run_backtest() -> None:
         logger.info(f"\n{calib_report}")
         _send_raw(calib_report)
 
+        # ── 12. 反馈汇总（非致命）────────────────────────────────────────────
+        try:
+            from screener.feedback_summary import run_feedback_summary
+            run_feedback_summary()
+        except Exception as _fb_err:
+            logger.warning(f"Feedback summary failed (non-fatal): {_fb_err}")
+
         logger.info("=== Canyon Backtest done ===")
 
     except Exception:

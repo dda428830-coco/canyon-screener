@@ -9,3 +9,7 @@ pandas-market-calendars>=4.3.2
 
 # 可选：IBKR 数据源补充（如不使用 IBKR 可注释掉）
 # ib_insync>=0.9.86
+
+# 反馈系统
+python-telegram-bot>=20.7
+anthropic>=0.30.0

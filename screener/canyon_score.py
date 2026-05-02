@@ -14,7 +14,6 @@ import yfinance as yf
 
 from screener.config import (
     C_MID_DAYS, C_NEAR_DAYS,
-    C_PE_DISCOUNT_HIGH, C_PE_DISCOUNT_LOW,
     E_CROWD_THRESHOLD, E_PULLBACK_HIGH, E_PULLBACK_LOW,
     E_RR_GOOD, E_RR_OK,
     E_VOL_RATIO_HIGH, E_VOL_RATIO_LOW,
@@ -25,17 +24,52 @@ from screener.config import (
 
 logger = logging.getLogger(__name__)
 
+# 行业 → SPDR 行业 ETF（周期错价用：判断行业景气度）
+_SECTOR_ETF: dict[str, str] = {
+    "Technology":             "XLK",
+    "Healthcare":             "XLV",
+    "Financials":             "XLF",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples":       "XLP",
+    "Energy":                 "XLE",
+    "Materials":              "XLB",
+    "Industrials":            "XLI",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+    "Communication Services": "XLC",
+}
+
+# 进程内缓存：每个 ETF 每次扫描只拉一次
+_sector_etf_cache: dict[str, bool] = {}
+
+
+def _sector_etf_positive(etf: str) -> bool:
+    """True if the sector ETF's 1-month return is positive."""
+    if etf in _sector_etf_cache:
+        return _sector_etf_cache[etf]
+    try:
+        hist   = yf.Ticker(etf).history(period="1mo")
+        result = (
+            not hist.empty
+            and len(hist) >= 2
+            and float(hist["Close"].iloc[-1]) > float(hist["Close"].iloc[0])
+        )
+    except Exception:
+        result = False
+    _sector_etf_cache[etf] = result
+    return result
+
 
 # ── 工具函数 ───────────────────────────────────────────────────────────────────
 
 def _atr(hist: pd.DataFrame, period: int = 14) -> float | None:
     try:
-        h = hist["High"].values
-        l = hist["Low"].values
-        c = hist["Close"].values
-        tr = np.maximum(h[1:] - l[1:],
+        h  = hist["High"].values
+        lo = hist["Low"].values
+        c  = hist["Close"].values
+        tr = np.maximum(h[1:] - lo[1:],
              np.maximum(np.abs(h[1:] - c[:-1]),
-                        np.abs(l[1:] - c[:-1])))
+                        np.abs(lo[1:] - c[:-1])))
         return float(np.mean(tr[-period:])) if len(tr) >= period else None
     except Exception:
         return None
@@ -48,10 +82,11 @@ def score_c(ticker: str, s0: dict, universe_data: dict) -> dict:
     total = 0
 
     try:
-        info   = yf.Ticker(ticker).info
-        sector = universe_data.get("sector") or "Unknown"
+        tk     = yf.Ticker(ticker)
+        info   = tk.info
+        sector = universe_data.get("sector") or info.get("sector") or "Unknown"
 
-        # C1 催化距离
+        # ── C1 催化距离 ────────────────────────────────────────────────────────
         days = s0.get("days_to_earnings")
         if days is not None:
             if days <= C_NEAR_DAYS:
@@ -65,32 +100,100 @@ def score_c(ticker: str, s0: dict, universe_data: dict) -> dict:
         d["c1"] = c1; d["c1_label"] = c1_label
         total += c1
 
-        # C2 错价幅度（Forward PE vs 行业中位数）
-        fpe         = info.get("forwardPE")
-        median_pe   = INDUSTRY_MEDIAN_PE.get(sector, INDUSTRY_MEDIAN_PE["Unknown"])
+        # ── C2 复合错价评分（Canyon v2.2）──────────────────────────────────────
+        #
+        # 五种错价类型，各自独立判断：
+        #   估值错价  2分  Forward PE < 行业中位数 × 0.8
+        #   认知错价  2分  分析师目标价 vs 现价上涨空间 > 20%
+        #   周期错价  2分  距52W低点 < 15% + 行业ETF近1月正收益
+        #   结构错价  2分  市值 < $5B + 营收增速 > 20%
+        #   流动性错价 1分  量能萎缩（s0量比 < 0.6）+ ROE > 0
+        #
+        # 得分 = max(各类型基础分) + 每个额外满足类型 × 0.5，上限4分（取整）
+
+        price     = float(
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+            or info.get("previousClose")
+            or 0
+        )
+        mktcap    = info.get("marketCap") or 0
+        revg      = info.get("revenueGrowth")
+        fpe       = info.get("forwardPE")
+        tgt_price = info.get("targetMeanPrice")
+        low52     = info.get("fiftyTwoWeekLow")
+        roe       = info.get("returnOnEquity")
+        median_pe = INDUSTRY_MEDIAN_PE.get(sector, INDUSTRY_MEDIAN_PE["Unknown"])
+
+        # 向后兼容字段（notifier.py 使用）
         d["forward_pe"]  = round(fpe, 2) if fpe is not None else None
         d["industry_pe"] = median_pe
         d["pe_discount"] = None
         d["pe_note"]     = None
-        # Bug-fix: 负 PE（亏损公司）折价计算无意义，直接给 0 分
         if fpe is not None and fpe <= 0:
-            c2 = 0
             d["pe_note"] = "PE负值/亏损"
-        elif fpe and fpe > 0 and median_pe > 0:
+
+        active:  list[str] = []   # 触发的错价类型名
+        details: list[str] = []   # 对应的数值说明
+
+        # 类型1：估值错价
+        if fpe and fpe > 0 and median_pe > 0:
             discount = (median_pe - fpe) / median_pe
             d["pe_discount"] = round(discount * 100, 1)
-            if discount > C_PE_DISCOUNT_HIGH:
-                c2 = 2
-            elif discount > C_PE_DISCOUNT_LOW:
-                c2 = 1
-            else:
-                c2 = 0
+            if discount > 0.20:
+                active.append("估值错价")
+                details.append(f"Forward PE折价{discount * 100:.0f}%")
+
+        # 类型2：认知错价
+        if price > 0 and tgt_price:
+            upside = (tgt_price - price) / price
+            d["analyst_upside_pct"] = round(upside * 100, 1)
+            if upside > 0.20:
+                active.append("认知错价")
+                details.append(f"分析师目标价上涨{upside * 100:.0f}%")
+        else:
+            d["analyst_upside_pct"] = None
+
+        # 类型3：周期错价
+        if price > 0 and low52 and low52 > 0:
+            near_low = (price - low52) / low52
+            d["near_52w_low_pct"] = round(near_low * 100, 1)
+            if near_low < 0.15:
+                etf = _SECTOR_ETF.get(sector)
+                if etf and _sector_etf_positive(etf):
+                    active.append("周期错价")
+                    details.append(f"距52周低点{near_low * 100:.0f}%")
+        else:
+            d["near_52w_low_pct"] = None
+
+        # 类型4：结构错价
+        if mktcap and mktcap < 5_000_000_000 and revg is not None and revg > 0.20:
+            active.append("结构错价")
+            details.append(f"营收增速{revg * 100:.0f}%")
+
+        # 类型5：流动性错价（用 s0 量比作代理，避免重复拉取历史）
+        vr_proxy = float(s0.get("volume_ratio_3_20") or 1.0)
+        d["vol_compression_ratio"] = round(vr_proxy, 2)
+        if vr_proxy < 0.6 and roe is not None and roe > 0:
+            active.append("流动性错价")
+            details.append(f"量比{vr_proxy:.2f}×")
+
+        # 计分
+        _base_pts = {"估值错价": 2, "认知错价": 2, "周期错价": 2, "结构错价": 2, "流动性错价": 1}
+        if active:
+            max_pts = max(_base_pts.get(tp, 1) for tp in active)
+            c2_raw  = max_pts + (len(active) - 1) * 0.5
+            c2      = min(4, int(c2_raw + 0.5))   # round-half-up, cap at 4
         else:
             c2 = 0
-        d["c2"] = c2
+
+        d["c2"]        = c2
+        d["c2_types"]  = active
+        d["c2_label"]  = " + ".join(active) if active else "无错价"
+        d["c2_detail"] = "（" + " + ".join(details) + "）" if details else ""
         total += c2
 
-        # C3 映射纯度（用行业相关性代替）
+        # ── C3 映射纯度 ────────────────────────────────────────────────────────
         if sector in LEAD_SECTORS:
             c3, c3_label = 2, "主线行业"
         elif sector and sector != "Unknown":
@@ -100,7 +203,7 @@ def score_c(ticker: str, s0: dict, universe_data: dict) -> dict:
         d["c3"] = c3; d["c3_label"] = c3_label; d["sector"] = sector
         total += c3
 
-        # C4 催化可信度
+        # ── C4 催化可信度 ──────────────────────────────────────────────────────
         c4 = 2 if s0.get("earnings_date") else 0
         d["c4"] = c4
         total += c4
@@ -243,18 +346,18 @@ def score_f(ticker: str) -> dict:
                     return
             parts += 1
 
-        d2e     = info.get("debtToEquity")
-        roe     = info.get("returnOnEquity")
-        revg    = info.get("revenueGrowth")
+        d2e  = info.get("debtToEquity")
+        roe  = info.get("returnOnEquity")
+        revg = info.get("revenueGrowth")
 
-        d["debt_to_equity"]  = round(d2e * 1, 1) if d2e is not None else None
-        d["roe_pct"]         = round(roe * 100, 1) if roe is not None else None
-        d["rev_growth_pct"]  = round(revg * 100, 1) if revg is not None else None
+        d["debt_to_equity"] = round(d2e * 1, 1) if d2e is not None else None
+        d["roe_pct"]        = round(roe * 100, 1) if roe is not None else None
+        d["rev_growth_pct"] = round(revg * 100, 1) if revg is not None else None
 
         # Debt/Equity: lower is better
         if d2e is not None:
             count += 1
-            if d2e < 30:   parts += 5
+            if d2e < 30:    parts += 5
             elif d2e < 60:  parts += 4
             elif d2e < 100: parts += 3
             elif d2e < 150: parts += 2
@@ -294,15 +397,15 @@ def score_ticker(ticker: str, s0: dict, universe_data: dict, hist: pd.DataFrame)
 
         cls = classify(c, e, m)
         return {
-            "ticker":         ticker,
-            "name":           universe_data.get("name", ticker),
-            "c":              c,
-            "e":              e,
-            "m":              m,
-            "f":              f,
-            "classification": cls,
+            "ticker":           ticker,
+            "name":             universe_data.get("name", ticker),
+            "c":                c,
+            "e":                e,
+            "m":                m,
+            "f":                f,
+            "classification":   cls,
             "days_to_earnings": s0.get("days_to_earnings"),
-            "earnings_date":  s0.get("earnings_date"),
+            "earnings_date":    s0.get("earnings_date"),
         }
     except Exception as ex:
         logger.error(f"score_ticker error {ticker}: {ex}")

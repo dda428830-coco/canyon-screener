@@ -65,6 +65,11 @@ UNIVERSE_WORKERS = 20   # 宇宙池并发数
 MODULE0_WORKERS  = 15   # Module 0 并发数
 SCORE_WORKERS    = 10   # 评分并发数
 
+# ── 反馈系统 ──────────────────────────────────────────────────────────────────
+ALLOWED_USER_IDS: list[int] = []   # Telegram 用户 ID 白名单；空列表 = 允许所有人
+CLAUDE_API_KEY   = os.environ.get("CLAUDE_API_KEY", "")
+GROUP_CHAT_ID    = os.environ.get("GROUP_CHAT_ID", "")   # 群组 Chat ID（负整数字符串）
+
 # === 上周校准建议（待确认）===
 # CALIBRATION_DATE = "尚未运行回测"
 # （每次周五回测运行后，backtest.py 会自动更新此处的校准建议）

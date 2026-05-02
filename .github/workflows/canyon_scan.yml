@@ -4,14 +4,15 @@ name: Canyon Stock Screener
 # 每个触发事件只会激活对应的 job（通过 github.event.schedule 条件判断）
 on:
   schedule:
-    - cron: "0 13 * * 1-5"   # 每交易日 ET 9:00 AM → 运行日扫描
+    - cron: "0 13 * * 1-5"    # 每交易日 ET 9:00 AM  → 运行日扫描
+    - cron: "30 13 * * 1-5"   # 每交易日 ET 9:30 AM  → 收集群组反馈
     - cron: "0 14 * * 5"      # 每周五   ET 10:00 AM → 运行周度回测
 
   # 手动触发：通过 inputs.job 选择运行哪个任务（用于测试）
   workflow_dispatch:
     inputs:
       job:
-        description: "选择要运行的任务 (scan / backtest / both)"
+        description: "选择要运行的任务 (scan / backtest / feedback / both)"
         required: false
         default: "both"
 
@@ -103,3 +104,47 @@ jobs:
           path: "*.log"
           if-no-files-found: ignore
           retention-days: 7
+
+# ── Job 3: 群组反馈收集 ─────────────────────────────────────────────────────────
+  feedback-bot:
+    name: Daily Feedback Collection (Mode A, ET 9:30 AM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    if: |
+      github.event.schedule == '30 13 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.job == 'feedback' || github.event.inputs.job == 'both'))
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run feedback bot (Mode A)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          CLAUDE_API_KEY:     ${{ secrets.CLAUDE_API_KEY }}
+          GROUP_CHAT_ID:      ${{ secrets.GROUP_CHAT_ID }}
+          ALLOWED_USER_IDS:   ${{ secrets.ALLOWED_USER_IDS }}
+          FEEDBACK_BOT_MODE:  "A"
+        run: python -m screener.feedback_bot
+
+      - name: Commit updated feedback.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/feedback.json
+          git diff --cached --quiet && echo "No changes" || git commit -m "chore: update feedback.json [skip ci]"
+          git push || echo "Push skipped (nothing to push)"
