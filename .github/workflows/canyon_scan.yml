@@ -1,0 +1,105 @@
+name: Canyon Stock Screener
+
+# ── 触发规则 ────────────────────────────────────────────────────────────────────
+# 每个触发事件只会激活对应的 job（通过 github.event.schedule 条件判断）
+on:
+  schedule:
+    - cron: "0 13 * * 1-5"   # 每交易日 ET 9:00 AM → 运行日扫描
+    - cron: "0 14 * * 5"      # 每周五   ET 10:00 AM → 运行周度回测
+
+  # 手动触发：通过 inputs.job 选择运行哪个任务（用于测试）
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "选择要运行的任务 (scan / backtest / both)"
+        required: false
+        default: "both"
+
+# ── 环境变量（所有 job 共享）──────────────────────────────────────────────────
+env:
+  PYTHONUNBUFFERED: "1"
+
+# ── Job 1: 日扫描 ───────────────────────────────────────────────────────────────
+jobs:
+  daily-scan:
+    name: Daily Canyon Scan (ET 9:00 AM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # 在以下情况运行：
+    #   ① schedule 触发且是日扫描的 cron
+    #   ② 手动触发且选择了 scan 或 both
+    if: |
+      github.event.schedule == '0 13 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.job == 'scan' || github.event.inputs.job == 'both'))
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run daily scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m screener.main
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-error-${{ github.run_id }}
+          path: "*.log"
+          if-no-files-found: ignore
+          retention-days: 7
+
+# ── Job 2: 周度回测 ─────────────────────────────────────────────────────────────
+  weekly-backtest:
+    name: Weekly Backtest (Friday ET 10:00 AM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90   # 回测需要下载更多数据，给足时间
+
+    # 在以下情况运行：
+    #   ① schedule 触发且是回测的 cron（每周五）
+    #   ② 手动触发且选择了 backtest 或 both
+    if: |
+      github.event.schedule == '0 14 * * 5' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.job == 'backtest' || github.event.inputs.job == 'both'))
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run weekly backtest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m screener.backtest
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-error-${{ github.run_id }}
+          path: "*.log"
+          if-no-files-found: ignore
+          retention-days: 7
